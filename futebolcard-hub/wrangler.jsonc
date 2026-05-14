@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "futebolcard-hub",
+  "compatibility_date": "2025-09-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "src/server.ts",
+  // Segredos: defina via `bunx wrangler secret put MASTER_PUBLIC_KEY` etc.
+  // Variáveis públicas (VITE_*) são embutidas no build via .env
+}
