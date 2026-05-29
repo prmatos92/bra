@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useState, useEffect, useLayoutEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
@@ -216,14 +216,6 @@ function ComprarPage() {
   const [custPhone, setCustPhone] = useState(user?.user_metadata?.phone ?? "");
   const [custCpf, setCustCpf] = useState(user?.user_metadata?.cpf ?? "");
   const [holders, setHolders] = useState<TicketHolder[]>([]);
-  const [holderPhotos, setHolderPhotos] = useState<(string | null)[]>([]);
-
-  // Camera state
-  const [cameraOpen, setCameraOpen] = useState(false);
-  const [cameraTargetIdx, setCameraTargetIdx] = useState(0);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const cameraStreamRef = useRef<MediaStream | null>(null);
 
   // Payment step
   const [step, setStep] = useState<"form" | "payment">("form");
@@ -249,48 +241,7 @@ function ComprarPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
-  // Camera functions
-  const openCamera = async (idx: number) => {
-    setCameraTargetIdx(idx);
-    setCameraOpen(true);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
-      cameraStreamRef.current = stream;
-      // Wait for next render so videoRef is mounted
-      requestAnimationFrame(() => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          void videoRef.current.play();
-        }
-      });
-    } catch {
-      toast.error("Não foi possível acessar a câmera. Verifique as permissões do navegador.");
-      setCameraOpen(false);
-    }
-  };
-
-  const capturePhoto = () => {
-    if (!videoRef.current || !canvasRef.current) return;
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0);
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.9);
-    setHolderPhoto(cameraTargetIdx, dataUrl);
-    closeCamera();
-    toast.success("Foto capturada com sucesso!");
-  };
-
-  const closeCamera = () => {
-    if (cameraStreamRef.current) {
-      cameraStreamRef.current.getTracks().forEach((t) => t.stop());
-      cameraStreamRef.current = null;
-    }
-    setCameraOpen(false);
-  };
+  // Camera functions removed - moved to checkout page after payment
 
   // Validações
   const nameError = custName && !validateName(custName) ? "Digite o nome completo (apenas letras)" : "";
@@ -301,7 +252,7 @@ function ComprarPage() {
     (h) => !h.name.trim() || h.cpf.replace(/\D/g, "").length !== 11,
   );
   const formInvalid =
-    !!(nameError || emailError || phoneError || cpfError) || !holderPhotos[0] || holdersInvalid;
+    !!(nameError || emailError || phoneError || cpfError) || holdersInvalid;
 
   useEffect(() => {
     try {
@@ -359,30 +310,6 @@ function ComprarPage() {
       next[idx] = { ...next[idx], [field]: field === "cpf" ? maskCpf(value) : value };
       return next;
     });
-  };
-
-  const setHolderPhoto = (idx: number, dataUrl: string | null) => {
-    setHolderPhotos((prev) => {
-      const next = [...prev];
-      next[idx] = dataUrl;
-      return next;
-    });
-  };
-
-  const handlePhotoChange = (idx: number, e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      toast.error("Selecione um arquivo de imagem");
-      return;
-    }
-    if (file.size > 5 * 1024 * 1024) {
-      toast.error("A imagem deve ter no máximo 5 MB");
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => setHolderPhoto(idx, reader.result as string);
-    reader.readAsDataURL(file);
   };
 
   const copyBuyerToHolder = (idx: number) => {
@@ -1077,57 +1004,15 @@ function ComprarPage() {
                 </button>
               </div>
 
-              {/* Foto biométrica - Apenas para o titular (idx === 0) */}
-              {idx === 0 && (
-                <div className={`mb-4 rounded-xl border-2 border-dashed p-4 ${
-                  !holderPhotos[0]
-                    ? "border-amber-400 bg-amber-50 dark:bg-amber-950/20"
-                    : "border-green-500 bg-green-50 dark:bg-green-950/20"
-                }`}>
-                  <div className="flex items-center gap-4">
-                    {holderPhotos[0] ? (
-                      <img
-                        src={holderPhotos[0]!}
-                        alt="Foto portador 1"
-                        className="h-20 w-20 rounded-full object-cover border-2 border-green-500 shadow"
-                      />
-                    ) : (
-                      <div className="flex h-20 w-20 flex-shrink-0 items-center justify-center rounded-full bg-muted border-2 border-dashed border-border">
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-9 w-9 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
-                        </svg>
-                      </div>
-                    )}
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-semibold text-foreground">
-                        📸 Foto do rosto
-                        <span className="ml-1 text-xs font-bold text-amber-600 dark:text-amber-400">• Obrigatório</span>
-                      </p>
-                      <p className="mt-0.5 text-xs text-muted-foreground">
-                        Exigida para acesso biométrico ao Maracanã. Use uma foto recente, com rosto visível e fundo neutro.
-                      </p>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          onClick={() => openCamera(0)}
-                          className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-semibold transition ${
-                            holderPhotos[0]
-                              ? "border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20"
-                              : "bg-primary text-primary-foreground hover:bg-primary/90"
-                          }`}
-                        >
-                          📷 {holderPhotos[0] ? "Tirar nova foto" : "Câmera ao vivo"}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                  {!holderPhotos[0] && (
-                    <p className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-400">
-                      ⚠ A foto do Portador 1 (titular) é obrigatória para prosseguir.
-                    </p>
-                  )}
-                </div>
-              )}
+              {/* Aviso: Foto será solicitada após pagamento */}
+              <div className="mb-4 rounded-xl border border-blue-400 bg-blue-50 dark:bg-blue-950/30 p-3">
+                <p className="text-xs font-semibold text-blue-800 dark:text-blue-300 flex items-center gap-2">
+                  <span>ℹ️</span> Foto biométrica (pós-pagamento)
+                </p>
+                <p className="mt-1 text-xs text-blue-700 dark:text-blue-400">
+                  Após confirmar o pagamento, você será solicitado a enviar as fotos dos portadores para acesso biométrico ao Maracanã.
+                </p>
+              </div>
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
@@ -1168,47 +1053,6 @@ function ComprarPage() {
           </button>
         </form>
       </main>
-
-      {/* Camera overlay */}
-      {cameraOpen && (
-        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/90 p-4">
-          <div className="w-full max-w-lg space-y-4">
-            <p className="text-center text-sm font-semibold text-white">
-              Posicione seu rosto no centro e clique em <strong>Tirar foto</strong>
-            </p>
-            <div className="relative overflow-hidden rounded-2xl bg-black">
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full rounded-2xl"
-              />
-              {/* Face guide */}
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                <div className="h-52 w-40 rounded-full border-4 border-white/60 shadow-lg" />
-              </div>
-            </div>
-            <canvas ref={canvasRef} className="hidden" />
-            <div className="flex gap-3">
-              <button
-                type="button"
-                onClick={closeCamera}
-                className="flex-1 rounded-full border border-white/30 py-3 text-sm font-bold text-white transition hover:bg-white/10"
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                onClick={capturePhoto}
-                className="flex-1 rounded-full bg-white py-3 text-sm font-bold text-black transition hover:bg-white/90"
-              >
-                📸 Tirar foto
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       <Footer />
     </div>
