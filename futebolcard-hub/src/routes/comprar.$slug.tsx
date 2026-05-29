@@ -655,7 +655,7 @@ function ComprarPage() {
           </div>
 
           {/* PIX limit warning */}
-          {overPixLimit && payMethod === "pix" ? (
+          {overPixLimit && payMethod === "pix" && (
             <div className="mb-4 flex items-start gap-3 rounded-2xl border-2 border-orange-400 bg-orange-50 p-4 text-sm dark:border-orange-600 dark:bg-orange-950/30">
               <span className="text-xl leading-none mt-0.5">🚫</span>
               <div>
@@ -664,13 +664,6 @@ function ComprarPage() {
                   Seu pedido totaliza <strong>{formatBRL(total)}</strong>. Reduza a quantidade de ingressos para prosseguir.
                 </p>
               </div>
-            </div>
-          ) : (
-            <div className="mb-4 flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M12 2a10 10 0 100 20A10 10 0 0012 2z" />
-              </svg>
-              <span>Limite de <strong>R$ 1.000,00</strong> por CPF via PIX.</span>
             </div>
           )}
 
