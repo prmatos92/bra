@@ -445,7 +445,7 @@ function ComprarPage() {
     }
     if (overPixLimit) {
       setPayError(
-        `Limite de R$ 1.000,00 por CPF via PIX. O valor do seu pedido (${formatBRL(total)}) ultrapassa o limite permitido. Reduza a quantidade de ingressos para continuar.`
+        `Limite de ingresso excedido. Reduza a quantidade de ingressos para continuar.`
       );
       return;
     }
@@ -659,10 +659,9 @@ function ComprarPage() {
             <div className="mb-4 flex items-start gap-3 rounded-2xl border-2 border-orange-400 bg-orange-50 p-4 text-sm dark:border-orange-600 dark:bg-orange-950/30">
               <span className="text-xl leading-none mt-0.5">🚫</span>
               <div>
-                <p className="font-bold text-orange-800 dark:text-orange-300">Pedido acima do limite PIX</p>
+                <p className="font-bold text-orange-800 dark:text-orange-300">Limite de ingresso excedido</p>
                 <p className="mt-1 text-orange-700 dark:text-orange-400">
-                  O limite máximo por CPF via PIX é de <strong>R$ 1.000,00</strong>. Seu pedido totaliza{" "}
-                  <strong>{formatBRL(total)}</strong>. Reduza a quantidade de ingressos para prosseguir.
+                  Seu pedido totaliza <strong>{formatBRL(total)}</strong>. Reduza a quantidade de ingressos para prosseguir.
                 </p>
               </div>
             </div>
