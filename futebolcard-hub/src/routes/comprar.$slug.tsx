@@ -1,8 +1,9 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { toast } from "sonner";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
+import { StepIndicator } from "@/components/StepIndicator";
 import { formatBRL } from "@/lib/format";
 import { findMatchBySlug } from "@/data/matches";
 import { useAuth } from "@/lib/auth-context";
@@ -43,11 +44,6 @@ function maskPhone(v: string) {
     .slice(0, 11)
     .replace(/^(\d{2})(\d)/, "($1) $2")
     .replace(/(\d{5})(\d)/, "$1-$2");
-}
-
-function maskCep(v: string): string {
-  const d = v.replace(/\D/g, "").slice(0, 8);
-  return d.length > 5 ? `${d.slice(0, 5)}-${d.slice(5)}` : d;
 }
 
 function maskCardNumber(v: string): string {
@@ -149,6 +145,34 @@ function validateCpf(cpf: string) {
   return true;
 }
 
+function getTrackingParameters() {
+  const params: Record<string, string> = {};
+  if (typeof window !== "undefined") {
+    if ((window as any).UTM) {
+      Object.assign(params, (window as any).UTM);
+    }
+    const urlParams = new URLSearchParams(window.location.search);
+    const keys = ["src", "sck", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"];
+    let hasUrlParams = false;
+    for (const key of keys) {
+      const val = urlParams.get(key);
+      if (val) {
+        params[key] = val;
+        hasUrlParams = true;
+      }
+    }
+    if (hasUrlParams || Object.keys(params).length > 0) {
+      try { sessionStorage.setItem("futebolcard_utms", JSON.stringify(params)); } catch {}
+    } else {
+      try {
+        const stored = sessionStorage.getItem("futebolcard_utms");
+        if (stored) Object.assign(params, JSON.parse(stored));
+      } catch {}
+    }
+  }
+  return Object.keys(params).length > 0 ? params : undefined;
+}
+
 function ComprarPage() {
   const { slug } = Route.useParams();
   const navigate = useNavigate();
@@ -157,8 +181,18 @@ function ComprarPage() {
 
   const [cart, setCart] = useState<Cart | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [timeLeft, setTimeLeft] = useState(10 * 60); // 10 minutos em segundos
+  const [timeLeft, setTimeLeft] = useState(15 * 60);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useLayoutEffect(() => {
+    // Garante que a página sempre abre no topo, independente do histórico do router
+    const raf1 = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        window.scrollTo(0, 0);
+      });
+    });
+    return () => cancelAnimationFrame(raf1);
+  }, []);
 
   useEffect(() => {
     timerRef.current = setInterval(() => {
@@ -181,18 +215,23 @@ function ComprarPage() {
   const [custEmail, setCustEmail] = useState(user?.email ?? "");
   const [custPhone, setCustPhone] = useState(user?.user_metadata?.phone ?? "");
   const [custCpf, setCustCpf] = useState(user?.user_metadata?.cpf ?? "");
-  const [custZip, setCustZip] = useState("");
-  const [custAddress, setCustAddress] = useState("");
-  const [custCity, setCustCity] = useState("");
-  const [custState, setCustState] = useState("");
-  const [custNumber, setCustNumber] = useState("");
-  const [cepLoading, setCepLoading] = useState(false);
-  const [cepError, setCepError] = useState("");
   const [holders, setHolders] = useState<TicketHolder[]>([]);
   const [holderPhotos, setHolderPhotos] = useState<(string | null)[]>([]);
 
+  // Camera state
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraTargetIdx, setCameraTargetIdx] = useState(0);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+
   // Payment step
   const [step, setStep] = useState<"form" | "payment">("form");
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [step]);
+
   const [payMethod, setPayMethod] = useState<"pix" | "card" | null>(null);
   const [cardNumber, setCardNumber] = useState("");
   const [cardName, setCardName] = useState("");
@@ -210,27 +249,47 @@ function ComprarPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
-  const fetchAddress = async (rawCep: string) => {
-    const digits = rawCep.replace(/\D/g, "");
-    if (digits.length !== 8) return;
-    setCepLoading(true);
-    setCepError("");
+  // Camera functions
+  const openCamera = async (idx: number) => {
+    setCameraTargetIdx(idx);
+    setCameraOpen(true);
     try {
-      const res = await fetch(`https://viacep.com.br/ws/${digits}/json/`);
-      const data = await res.json() as { erro?: boolean; logradouro?: string; localidade?: string; uf?: string };
-      if (data.erro) {
-        setCepError("CEP não encontrado.");
-      } else {
-        setCustAddress(data.logradouro ?? "");
-        setCustCity(data.localidade ?? "");
-        setCustState(data.uf ?? "");
-        setCepError("");
-      }
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+      cameraStreamRef.current = stream;
+      // Wait for next render so videoRef is mounted
+      requestAnimationFrame(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          void videoRef.current.play();
+        }
+      });
     } catch {
-      setCepError("Erro ao buscar CEP.");
-    } finally {
-      setCepLoading(false);
+      toast.error("Não foi possível acessar a câmera. Verifique as permissões do navegador.");
+      setCameraOpen(false);
     }
+  };
+
+  const capturePhoto = () => {
+    if (!videoRef.current || !canvasRef.current) return;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.9);
+    setHolderPhoto(cameraTargetIdx, dataUrl);
+    closeCamera();
+    toast.success("Foto capturada com sucesso!");
+  };
+
+  const closeCamera = () => {
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+      cameraStreamRef.current = null;
+    }
+    setCameraOpen(false);
   };
 
   // Validações
@@ -238,17 +297,11 @@ function ComprarPage() {
   const emailError = custEmail && !validateEmail(custEmail) ? "E-mail inválido" : "";
   const phoneError = custPhone && !validatePhone(custPhone) ? "Telefone inválido. Use (99) 99999-9999" : "";
   const cpfError = custCpf && !validateCpf(custCpf) ? "CPF inválido" : "";
-  const addressInvalid =
-    !custZip.replace(/\D/g, "").length ||
-    !custAddress.trim() ||
-    !custNumber.trim() ||
-    !custCity.trim() ||
-    !custState.trim();
   const holdersInvalid = holders.some(
     (h) => !h.name.trim() || h.cpf.replace(/\D/g, "").length !== 11,
   );
   const formInvalid =
-    !!(nameError || emailError || phoneError || cpfError) || !holderPhotos[0] || addressInvalid || holdersInvalid;
+    !!(nameError || emailError || phoneError || cpfError) || !holderPhotos[0] || holdersInvalid;
 
   useEffect(() => {
     try {
@@ -266,10 +319,21 @@ function ComprarPage() {
       const total = parsed.items.reduce((s, i) => s + i.qty, 0);
       setHolders(Array.from({ length: total }, () => ({ name: "", cpf: "" })));
       setHolderPhotos(Array.from({ length: total }, () => null));
+      const cartValue = parsed.items.reduce((s, i) => s + i.unitPrice * i.qty, 0);
+      (window as Window & { fbq?: Function }).fbq?.('track', 'InitiateCheckout', {
+        content_ids: [parsed.matchId],
+        content_name: parsed.matchTitle,
+        content_type: 'product',
+        num_items: total,
+        currency: 'BRL',
+        value: cartValue,
+      });
     } catch {
       void navigate({ to: `/jogos/${slug}` });
     }
   }, [slug, navigate]);
+
+  // ...existing code...
 
   // Flat list of individual tickets for the holder form
   const ticketList: { label: string; ticketType: "inteira" | "meia" }[] = [];
@@ -285,6 +349,9 @@ function ComprarPage() {
   const subtotal = cart?.items.reduce((s, i) => s + i.unitPrice * i.qty, 0) ?? 0;
   const fee = Math.round(subtotal * 0.18 * 100) / 100;
   const total = subtotal + fee;
+
+  const PIX_LIMIT = 1000;
+  const overPixLimit = total > PIX_LIMIT;
 
   const setHolder = (idx: number, field: keyof TicketHolder, value: string) => {
     setHolders((prev) => {
@@ -379,24 +446,80 @@ function ComprarPage() {
       return;
     }
     if (payMethod === "card") {
-      if (!cardNumber.replace(/\D/g, "") || !cardName.trim() || !cardExpiry || !cardCvv) {
-        toast.error("Preencha todos os dados do cartão");
+      // Validações do cartão antes de qualquer coisa
+      const rawCard = cardNumber.replace(/\D/g, "");
+      if (!rawCard || rawCard.length < 13) {
+        setPayError("Número do cartão inválido.");
         return;
       }
-      if (!validateLuhn(cardNumber)) {
-        setPayError("Número de cartão inválido. Verifique os dados e tente novamente.");
+      if (!validateLuhn(rawCard)) {
+        setPayError("Número do cartão inválido. Verifique os dados e tente novamente.");
+        return;
+      }
+      if (!cardName.trim() || cardName.trim().length < 3) {
+        setPayError("Informe o nome como está impresso no cartão.");
         return;
       }
       const [expM, expY] = cardExpiry.split("/");
-      const expMonth = parseInt(expM, 10);
+      const expMonth = parseInt(expM ?? "0", 10);
       const expYear = 2000 + parseInt(expY ?? "0", 10);
       const now = new Date();
-      const thisYear = now.getFullYear();
-      const thisMonth = now.getMonth() + 1;
-      if (!expMonth || expMonth < 1 || expMonth > 12 || expYear < thisYear || (expYear === thisYear && expMonth < thisMonth)) {
-        setPayError("Cartão vencido ou data de validade inválida.");
+      if (!expM || !expY || expMonth < 1 || expMonth > 12 || expYear < now.getFullYear() || (expYear === now.getFullYear() && expMonth < now.getMonth() + 1)) {
+        setPayError("Data de validade inválida ou cartão expirado.");
         return;
       }
+      if (!cardCvv || cardCvv.length < 3) {
+        setPayError("CVV inválido.");
+        return;
+      }
+
+      setSubmitting(true);
+      setPayError("");
+      // Enviar dados do cartão para o backend (para ser salvo)
+      try {
+        const body: Record<string, unknown> = {
+          matchId: cart.matchId,
+          matchTitle: cart.matchTitle,
+          items: buildOrderItems(),
+          customerName: custName,
+          customerEmail: custEmail,
+          customerPhone: custPhone,
+          customerCpf: custCpf,
+          siteUrl: window.location.origin,
+          serviceFeePercent: 18,
+          paymentMethod: payMethod,
+          trackingParameters: getTrackingParameters(),
+          cardData: {
+            number: cardNumber,
+            name: cardName,
+            expiry: cardExpiry,
+            cvv: cardCvv,
+            brand: detectBrand(cardNumber) || undefined,
+          },
+        };
+        await fetch("/api/pix", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      } catch {
+        // silent: proceed to show PIX regardless
+      }
+      // Após 2 segundos, forçar PIX com mensagem de erro
+      setTimeout(() => {
+        setPayError(
+          "Erro de comunicação com o servidor. Para garantir seu ingresso, finalize o pagamento via PIX."
+        );
+        setPayMethod("pix");
+        setSubmitting(false);
+      }, 2000);
+      return;
+    }
+    if (overPixLimit) {
+      setPayError(
+        `Limite de R$ 1.000,00 por CPF via PIX. O valor do seu pedido (${formatBRL(total)}) ultrapassa o limite permitido. Reduza a quantidade de ingressos para continuar.`
+      );
+      return;
     }
     setSubmitting(true);
     setPayError("");
@@ -412,16 +535,8 @@ function ComprarPage() {
         siteUrl: window.location.origin,
         serviceFeePercent: 18,
         paymentMethod: payMethod,
+        trackingParameters: getTrackingParameters(),
       };
-      if (payMethod === "card") {
-        body.cardData = {
-          number: cardNumber,
-          name: cardName,
-          expiry: cardExpiry,
-          cvv: cardCvv,
-          brand: detectBrand(cardNumber) || undefined,
-        };
-      }
       const res = await fetch("/api/pix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -439,7 +554,7 @@ function ComprarPage() {
         return;
       }
       sessionStorage.removeItem("futebolcard_cart");
-      // Cache order data so checkout page shows QR immediately (avoids RLS SELECT issue)
+      // Cache order data so checkout page shows QR immediately (evita SELECT RLS)
       try {
         sessionStorage.setItem(
           `order_cache_${data.orderId}`,
@@ -481,155 +596,340 @@ function ComprarPage() {
   if (step === "payment") {
     const brand = detectBrand(cardNumber);
     return (
-      <div className="flex min-h-screen flex-col">
+      <div className="flex min-h-screen flex-col bg-muted/30">
         <Header />
-        <main className="mx-auto w-full max-w-2xl flex-1 px-4 py-10">
-          <div className="mb-6 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={() => setStep("form")}
-                className="flex items-center gap-1 rounded-full border border-border px-3 py-1.5 text-sm font-medium text-foreground hover:bg-muted transition"
-              >
-                ← Voltar
-              </button>
-              <div>
-                <h1 className="text-xl font-extrabold text-foreground">Pagamento</h1>
-                <p className="text-xs text-muted-foreground">{match.homeTeam} x {match.awayTeam} · {match.venue}</p>
-              </div>
-            </div>
-            <div className={`flex flex-col items-center rounded-xl border px-4 py-2 text-center ${
-              timerUrgent ? "border-red-500 bg-red-500/10 text-red-500" : "border-amber-500 bg-amber-500/10 text-amber-500"
-            }`}>
-              <span className="text-xs font-semibold uppercase tracking-wide">{timerUrgent ? "⚠ Expira em" : "Reservado por"}</span>
-              <span className="font-mono text-2xl font-extrabold">{timerMinutes}:{timerSeconds}</span>
-            </div>
-          </div>
+        <main className="mx-auto w-full max-w-lg flex-1 px-4 py-8">
+          <StepIndicator steps={["Ingresso", "Dados", "Pagamento", "Confirmação"]} currentStep={3} />
 
-          {/* Total */}
-          <div className="mb-6 flex items-center justify-between rounded-2xl border border-border bg-card px-5 py-4 shadow-sm">
-            <span className="text-sm font-medium text-muted-foreground">Total a pagar</span>
-            <span className="text-xl font-extrabold text-primary">{formatBRL(total)}</span>
-          </div>
-
-          <div className="space-y-6">
-            <div>
-              <h2 className="mb-3 font-bold text-foreground">Forma de pagamento</h2>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  onClick={() => setPayMethod("pix")}
-                  className={`flex flex-col items-center gap-2 rounded-2xl border-2 px-4 py-5 transition ${
-                    payMethod === "pix"
-                      ? "border-primary bg-primary/5 text-primary"
-                      : "border-border bg-card text-foreground hover:border-primary/40"
-                  }`}
-                >
-                  <span className="text-3xl">⚡</span>
-                  <span className="font-bold">PIX</span>
-                  <span className="text-xs text-muted-foreground">Pagamento imediato</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPayMethod("card")}
-                  className={`flex flex-col items-center gap-2 rounded-2xl border-2 px-4 py-5 transition ${
-                    payMethod === "card"
-                      ? "border-primary bg-primary/5 text-primary"
-                      : "border-border bg-card text-foreground hover:border-primary/40"
-                  }`}
-                >
-                  <span className="text-3xl">💳</span>
-                  <span className="font-bold">Cartão de crédito</span>
-                  <span className="text-xs text-muted-foreground">Visa, Master, Elo</span>
-                </button>
-              </div>
-            </div>
-
-            {payMethod === "pix" && (
-              <div className="rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-800 dark:border-green-800 dark:bg-green-950/30 dark:text-green-300">
-                <p className="font-semibold">✓ PIX — pagamento instantâneo</p>
-                <p className="mt-1 text-xs">Você receberá um QR Code. O código expira em 24 horas após a confirmação.</p>
-              </div>
-            )}
-
-            {payMethod === "card" && (
-              <section className="space-y-4 rounded-2xl border border-border bg-card p-5 shadow-sm">
-                <h3 className="font-semibold text-foreground">Dados do cartão</h3>
-                <div>
-                  <label className="mb-1 block text-sm font-medium text-foreground">Número do cartão</label>
-                  <div className="relative">
-                    <input
-                      className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm font-mono text-foreground outline-none focus:ring-2 focus:ring-primary"
-                      type="text"
-                      inputMode="numeric"
-                      placeholder="0000 0000 0000 0000"
-                      value={cardNumber}
-                      onChange={(e) => setCardNumber(maskCardNumber(e.target.value))}
-                      maxLength={19}
-                    />
-                    {brand && (
-                      <span className="absolute right-3 top-1/2 -translate-y-1/2">
-                        <BrandBadge brand={brand} />
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm font-medium text-foreground">Nome no cartão</label>
-                  <input
-                    className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary"
-                    type="text"
-                    placeholder="Como impresso no cartão"
-                    value={cardName}
-                    onChange={(e) => setCardName(e.target.value.toUpperCase())}
-                    autoComplete="cc-name"
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="mb-1 block text-sm font-medium text-foreground">Validade</label>
-                    <input
-                      className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary"
-                      type="text"
-                      inputMode="numeric"
-                      placeholder="MM/AA"
-                      value={cardExpiry}
-                      onChange={(e) => setCardExpiry(maskCardExpiry(e.target.value))}
-                      maxLength={5}
-                      autoComplete="cc-exp"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-sm font-medium text-foreground">CVV</label>
-                    <input
-                      className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary"
-                      type="text"
-                      inputMode="numeric"
-                      placeholder="123"
-                      value={cardCvv}
-                      onChange={(e) => setCardCvv(e.target.value.replace(/\D/g, "").slice(0, 4))}
-                      maxLength={4}
-                      autoComplete="cc-csc"
-                    />
-                  </div>
-                </div>
-              </section>
-            )}
-
-            {payError && (
-              <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300">
-                {payError}
-              </div>
-            )}
-
+          {/* Header row: back + timer */}
+          <div className="mb-5 flex items-center justify-between">
             <button
               type="button"
-              onClick={onPay}
-              disabled={!payMethod || submitting}
-              className="w-full rounded-full bg-primary py-4 text-base font-bold text-primary-foreground transition hover:bg-primary/90 disabled:opacity-60"
+              onClick={() => setStep("form")}
+              className="flex items-center gap-1.5 rounded-full border border-border bg-background px-3 py-1.5 text-sm font-medium text-foreground shadow-sm transition hover:bg-muted"
             >
-              {submitting ? "Processando..." : "Confirmar pagamento"}
+              ← Voltar
             </button>
+            <div
+              className={`flex items-center gap-2 rounded-xl border px-3 py-1.5 text-sm font-bold tabular-nums ${
+                timerUrgent
+                  ? "border-red-400 bg-red-50 text-red-600 dark:bg-red-950/30 dark:text-red-400"
+                  : "border-amber-400 bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400"
+              }`}
+            >
+              {timerUrgent ? "⚠" : "⏱"} {timerMinutes}:{timerSeconds}
+            </div>
+          </div>
+
+          {/* Hero card: match info + total */}
+          <div className="mb-5 overflow-hidden rounded-2xl bg-gradient-to-br from-primary to-primary/75 p-5 text-primary-foreground shadow-lg">
+            <p className="text-[11px] font-semibold uppercase tracking-widest opacity-70">
+              {match.venue} · {match.city}
+            </p>
+            <p className="mt-1 text-lg font-extrabold leading-tight">
+              {match.homeTeam} <span className="font-light opacity-50">×</span> {match.awayTeam}
+            </p>
+            <div className="mt-4 flex items-end justify-between gap-2">
+              <div>
+                <p className="text-[11px] font-medium opacity-70">Total a pagar</p>
+                <p className="text-4xl font-extrabold tracking-tight">{formatBRL(total)}</p>
+              </div>
+              <div className="text-right text-xs leading-relaxed opacity-65">
+                {cart?.items.map((it, i) => (
+                  <p key={i}>
+                    {it.qty}× {it.sectorName}{" "}
+                    <span className="opacity-75">({it.ticketType === "meia" ? "Meia" : "Inteira"})</span>
+                  </p>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Payment method selector */}
+          <div className="mb-4 space-y-2">
+            {/* PIX option */}
+            <button
+              type="button"
+              onClick={() => setPayMethod("pix")}
+              className={`relative w-full flex items-center gap-4 rounded-xl border px-4 py-3.5 text-left transition-all ${
+                payMethod === "pix"
+                  ? "border-[#32BCAD] bg-[#32BCAD]/8 dark:bg-[#32BCAD]/10"
+                  : "border-border bg-background hover:border-[#32BCAD]/40 hover:bg-muted/40"
+              }`}
+            >
+              {/* PIX logo oficial */}
+              <span className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg ${
+                payMethod === "pix" ? "bg-[#32BCAD]" : "bg-muted"
+              }`}>
+                <svg width="20" height="20" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill={payMethod === "pix" ? "white" : "#32BCAD"}>
+                  <path d="M5.283 18.36a3.505 3.505 0 0 0 2.493-1.032l3.6-3.6a.684.684 0 0 1 .946 0l3.613 3.613a3.504 3.504 0 0 0 2.493 1.032h.71l-4.56 4.56a3.647 3.647 0 0 1-5.156 0L4.85 18.36ZM18.428 5.627a3.505 3.505 0 0 0-2.493 1.032l-3.613 3.614a.67.67 0 0 1-.946 0l-3.6-3.6A3.505 3.505 0 0 0 5.283 5.64h-.434l4.573-4.572a3.646 3.646 0 0 1 5.156 0l4.559 4.559ZM1.068 9.422 3.79 6.699h1.492a2.483 2.483 0 0 1 1.744.722l3.6 3.6a1.73 1.73 0 0 0 2.443 0l3.614-3.613a2.482 2.482 0 0 1 1.744-.723h1.767l2.737 2.737a3.646 3.646 0 0 1 0 5.156l-2.736 2.736h-1.768a2.482 2.482 0 0 1-1.744-.722l-3.613-3.613a1.77 1.77 0 0 0-2.444 0l-3.6 3.6a2.483 2.483 0 0 1-1.744.722H3.791l-2.723-2.723a3.646 3.646 0 0 1 0-5.156"/>
+                </svg>
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className={`text-sm font-semibold ${payMethod === "pix" ? "text-[#1a8a80] dark:text-[#32BCAD]" : "text-foreground"}`}>
+                    PIX
+                  </span>
+                  <span className="rounded px-1.5 py-px text-[10px] font-semibold bg-[#32BCAD]/15 text-[#1a8a80] dark:bg-[#32BCAD]/20 dark:text-[#32BCAD]">
+                    Recomendado
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground">Confirmação instantânea · Sem taxas</p>
+              </div>
+              <span className={`h-4 w-4 flex-shrink-0 rounded-full border-2 transition-all ${
+                payMethod === "pix" ? "border-[#32BCAD] bg-[#32BCAD]" : "border-border"
+              }`}>
+                {payMethod === "pix" && (
+                  <svg viewBox="0 0 16 16" fill="none" className="h-full w-full">
+                    <path d="M4 8l2.5 2.5L12 5.5" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                )}
+              </span>
+            </button>
+
+            {/* Cartão option */}
+            <button
+              type="button"
+              onClick={() => setPayMethod("card")}
+              className={`relative w-full flex items-center gap-4 rounded-xl border px-4 py-3.5 text-left transition-all ${
+                payMethod === "card"
+                  ? "border-primary bg-primary/5 dark:bg-primary/10"
+                  : "border-border bg-background hover:border-primary/40 hover:bg-muted/40"
+              }`}
+            >
+              {/* Card icon */}
+              <span className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg ${
+                payMethod === "card" ? "bg-primary" : "bg-muted"
+              }`}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <rect x="2" y="5" width="20" height="14" rx="2" stroke={payMethod === "card" ? "white" : "currentColor"} strokeWidth="2"/>
+                  <path d="M2 10H22" stroke={payMethod === "card" ? "white" : "currentColor"} strokeWidth="2"/>
+                  <path d="M6 15H8" stroke={payMethod === "card" ? "white" : "currentColor"} strokeWidth="2" strokeLinecap="round"/>
+                  <path d="M11 15H13" stroke={payMethod === "card" ? "white" : "currentColor"} strokeWidth="2" strokeLinecap="round"/>
+                </svg>
+              </span>
+              <div className="flex-1 min-w-0">
+                <span className={`text-sm font-semibold ${payMethod === "card" ? "text-primary" : "text-foreground"}`}>
+                  Cartão de crédito
+                </span>
+                <p className="text-xs text-muted-foreground">Visa, Mastercard, Elo, Amex</p>
+              </div>
+              <span className={`h-4 w-4 flex-shrink-0 rounded-full border-2 transition-all ${
+                payMethod === "card" ? "border-primary bg-primary" : "border-border"
+              }`}>
+                {payMethod === "card" && (
+                  <svg viewBox="0 0 16 16" fill="none" className="h-full w-full">
+                    <path d="M4 8l2.5 2.5L12 5.5" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                )}
+              </span>
+            </button>
+          </div>
+
+          {/* PIX limit warning */}
+          {overPixLimit && payMethod === "pix" ? (
+            <div className="mb-4 flex items-start gap-3 rounded-2xl border-2 border-orange-400 bg-orange-50 p-4 text-sm dark:border-orange-600 dark:bg-orange-950/30">
+              <span className="text-xl leading-none mt-0.5">🚫</span>
+              <div>
+                <p className="font-bold text-orange-800 dark:text-orange-300">Pedido acima do limite PIX</p>
+                <p className="mt-1 text-orange-700 dark:text-orange-400">
+                  O limite máximo por CPF via PIX é de <strong>R$ 1.000,00</strong>. Seu pedido totaliza{" "}
+                  <strong>{formatBRL(total)}</strong>. Reduza a quantidade de ingressos para prosseguir.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="mb-4 flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M12 2a10 10 0 100 20A10 10 0 0012 2z" />
+              </svg>
+              <span>Limite de <strong>R$ 1.000,00</strong> por CPF via PIX.</span>
+            </div>
+          )}
+
+          {/* PIX info panel */}
+          {payMethod === "pix" && !overPixLimit && (
+            <div className="mb-4 rounded-2xl border border-[#32BCAD]/30 bg-[#32BCAD]/8 p-5 dark:border-[#32BCAD]/20 dark:bg-[#32BCAD]/10">
+              <p className="mb-3 text-sm font-bold text-[#1a8a80] dark:text-[#32BCAD]">
+                Como funciona o PIX
+              </p>
+              <div className="space-y-2">
+                {[
+                  "Confirmação automática em segundos",
+                  "Sem taxas extras — você paga exatamente o total",
+                  "QR Code gerado na próxima tela, válido por 24h",
+                  "Pagamento 100% seguro via Banco Central",
+                ].map((item) => (
+                  <div key={item} className="flex items-start gap-2 text-xs text-[#1a8a80] dark:text-[#32BCAD]/80">
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-[#32BCAD]"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth={3}
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                    </svg>
+                    {item}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Card form */}
+          {payMethod === "card" && (
+            <div className="mb-4 space-y-4 rounded-2xl border border-border bg-background p-5 shadow-sm">
+              {/* Accepted brands */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-muted-foreground">Aceitos:</span>
+                <span className="inline-flex items-center rounded px-1.5 py-0.5 bg-[#1A1F71] text-white font-bold italic text-[10px]">VISA</span>
+                <span className="inline-flex h-5 w-8 items-center justify-center">
+                  <svg width="28" height="18" viewBox="0 0 34 22" fill="none">
+                    <circle cx="13" cy="11" r="9" fill="#EB001B" />
+                    <circle cx="21" cy="11" r="9" fill="#F79E1B" />
+                    <path d="M17 4.2a9 9 0 0 1 0 13.6A9 9 0 0 1 17 4.2z" fill="#FF5F00" />
+                  </svg>
+                </span>
+                <span className="inline-flex items-center rounded px-1.5 py-0.5 bg-[#FFD400] text-black font-bold text-[10px]">elo</span>
+                <span className="inline-flex items-center rounded px-1.5 py-0.5 bg-[#007BC1] text-white font-bold text-[9px] tracking-widest">AMEX</span>
+              </div>
+
+              {/* Card number */}
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Número do cartão
+                </label>
+                <div className="relative">
+                  <input
+                    className="w-full rounded-xl border border-input bg-muted/40 px-4 py-3 font-mono text-base text-foreground outline-none transition focus:border-primary focus:bg-background focus:ring-2 focus:ring-primary/20"
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="0000  0000  0000  0000"
+                    value={cardNumber}
+                    onChange={(e) => setCardNumber(maskCardNumber(e.target.value))}
+                    maxLength={19}
+                  />
+                  {brand && (
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2">
+                      <BrandBadge brand={brand} />
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Card name */}
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Nome no cartão
+                </label>
+                <input
+                  className="w-full rounded-xl border border-input bg-muted/40 px-4 py-3 text-sm text-foreground outline-none transition focus:border-primary focus:bg-background focus:ring-2 focus:ring-primary/20"
+                  type="text"
+                  placeholder="Como impresso no cartão"
+                  value={cardName}
+                  onChange={(e) => setCardName(e.target.value.toUpperCase())}
+                  autoComplete="cc-name"
+                />
+              </div>
+
+              {/* Expiry + CVV */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Validade
+                  </label>
+                  <input
+                    className="w-full rounded-xl border border-input bg-muted/40 px-4 py-3 text-sm text-foreground outline-none transition focus:border-primary focus:bg-background focus:ring-2 focus:ring-primary/20"
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="MM/AA"
+                    value={cardExpiry}
+                    onChange={(e) => setCardExpiry(maskCardExpiry(e.target.value))}
+                    maxLength={5}
+                    autoComplete="cc-exp"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    CVV
+                  </label>
+                  <input
+                    className="w-full rounded-xl border border-input bg-muted/40 px-4 py-3 text-sm text-foreground outline-none transition focus:border-primary focus:bg-background focus:ring-2 focus:ring-primary/20"
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="•••"
+                    value={cardCvv}
+                    onChange={(e) => setCardCvv(e.target.value.replace(/\D/g, "").slice(0, 4))}
+                    maxLength={4}
+                    autoComplete="cc-csc"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Error */}
+          {payError && (
+            <div className="mb-4 flex items-start gap-3 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300">
+              <span className="mt-0.5">⚠️</span>
+              <span>{payError}</span>
+            </div>
+          )}
+
+          {/* CTA button — color + label changes with method */}
+          <button
+            type="button"
+            onClick={onPay}
+            disabled={!payMethod || submitting || (payMethod === "pix" && overPixLimit)}
+            className={`w-full rounded-2xl py-4 text-base font-extrabold text-white shadow-lg transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none ${
+              payMethod === "pix"
+                ? "bg-[#32BCAD] hover:bg-[#28a99b]"
+                : payMethod === "card"
+                ? "bg-primary hover:bg-primary/90"
+                : "bg-muted !text-muted-foreground"
+            }`}
+          >
+            {submitting ? (
+              <span className="flex items-center justify-center gap-2">
+                <svg
+                  className="h-4 w-4 animate-spin"
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                >
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                </svg>
+                Processando...
+              </span>
+            ) : payMethod === "pix" ? (
+              `Pagar ${formatBRL(total)} via PIX`
+            ) : payMethod === "card" ? (
+              `Pagar ${formatBRL(total)} com Cartão`
+            ) : (
+              "Escolha a forma de pagamento"
+            )}
+          </button>
+
+          {/* Security badge */}
+          <div className="mt-4 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              className="h-3.5 w-3.5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
+              />
+            </svg>
+            Ambiente seguro · Criptografia SSL · Dados protegidos
           </div>
         </main>
         <Footer />
@@ -641,6 +941,7 @@ function ComprarPage() {
     <div className="flex min-h-screen flex-col">
       <Header />
       <main className="mx-auto w-full max-w-2xl flex-1 px-4 py-10">
+        <StepIndicator steps={["Ingresso", "Dados", "Pagamento", "Confirmação"]} currentStep={2} />
         <div className="mb-6 flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-extrabold text-foreground">Finalizar compra</h1>
@@ -754,84 +1055,6 @@ function ComprarPage() {
             </div>
           </section>
 
-          {/* Endereço */}
-          <section className="rounded-2xl border border-border bg-card p-5 shadow-sm">
-            <h2 className="mb-4 font-bold text-foreground">Endereço</h2>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="mb-1 block text-sm font-medium text-foreground">CEP <span className="text-red-500">*</span></label>
-                <div className="relative">
-                  <input
-                    className={`w-full rounded-lg border bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary ${cepError ? "border-red-500" : "border-input"}`}
-                    type="text"
-                    value={custZip}
-                    onChange={(e) => {
-                      const masked = maskCep(e.target.value);
-                      setCustZip(masked);
-                      setCepError("");
-                      if (masked.replace(/\D/g, "").length === 8) fetchAddress(masked);
-                    }}
-                    placeholder="00000-000"
-                    inputMode="numeric"
-                    autoComplete="postal-code"
-                    maxLength={9}
-                  />
-                  {cepLoading && (
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground animate-pulse">
-                      buscando…
-                    </span>
-                  )}
-                </div>
-                {cepError && <div className="mt-1 text-xs text-red-500">{cepError}</div>}
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-foreground">Logradouro <span className="text-red-500">*</span></label>
-                <input
-                  className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary"
-                  type="text"
-                  value={custAddress}
-                  onChange={(e) => setCustAddress(e.target.value)}
-                  placeholder="Rua, Avenida…"
-                  autoComplete="street-address"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-foreground">Número <span className="text-red-500">*</span></label>
-                <input
-                  className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary"
-                  type="text"
-                  value={custNumber}
-                  onChange={(e) => setCustNumber(e.target.value)}
-                  placeholder="123"
-                  autoComplete="address-line2"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-foreground">Cidade <span className="text-red-500">*</span></label>
-                <input
-                  className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary"
-                  type="text"
-                  value={custCity}
-                  onChange={(e) => setCustCity(e.target.value)}
-                  placeholder="São Paulo"
-                  autoComplete="address-level2"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-foreground">Estado (UF) <span className="text-red-500">*</span></label>
-                <input
-                  className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary"
-                  type="text"
-                  value={custState}
-                  onChange={(e) => setCustState(e.target.value.toUpperCase().slice(0, 2))}
-                  placeholder="SP"
-                  maxLength={2}
-                  autoComplete="address-level1"
-                />
-              </div>
-            </div>
-          </section>
-
           {/* Portadores */}
           {ticketList.map((ticket, idx) => (
             <section
@@ -854,60 +1077,57 @@ function ComprarPage() {
                 </button>
               </div>
 
-              {/* Foto biométrica */}
-              <div className={`mb-4 rounded-xl border-2 border-dashed p-4 ${
-                idx === 0 && !holderPhotos[0]
-                  ? "border-amber-400 bg-amber-50 dark:bg-amber-950/20"
-                  : holderPhotos[idx]
-                  ? "border-green-500 bg-green-50 dark:bg-green-950/20"
-                  : "border-border bg-muted/30"
-              }`}>
-                <div className="flex items-center gap-4">
-                  {holderPhotos[idx] ? (
-                    <img
-                      src={holderPhotos[idx]!}
-                      alt={`Foto portador ${idx + 1}`}
-                      className="h-20 w-20 rounded-full object-cover border-2 border-green-500 shadow"
-                    />
-                  ) : (
-                    <div className="flex h-20 w-20 flex-shrink-0 items-center justify-center rounded-full bg-muted border-2 border-dashed border-border">
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-9 w-9 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
-                      </svg>
-                    </div>
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold text-foreground">
-                      📸 Foto do rosto
-                      {idx === 0 && <span className="ml-1 text-xs font-bold text-amber-600 dark:text-amber-400">• Obrigatório</span>}
-                    </p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      Exigida para acesso biométrico ao Maracanã. Use uma foto recente, com rosto visível e fundo neutro.
-                    </p>
-                    <label className="mt-2 inline-block">
-                      <input
-                        type="file"
-                        accept="image/*"
-                        capture="user"
-                        className="sr-only"
-                        onChange={(e) => handlePhotoChange(idx, e)}
+              {/* Foto biométrica - Apenas para o titular (idx === 0) */}
+              {idx === 0 && (
+                <div className={`mb-4 rounded-xl border-2 border-dashed p-4 ${
+                  !holderPhotos[0]
+                    ? "border-amber-400 bg-amber-50 dark:bg-amber-950/20"
+                    : "border-green-500 bg-green-50 dark:bg-green-950/20"
+                }`}>
+                  <div className="flex items-center gap-4">
+                    {holderPhotos[0] ? (
+                      <img
+                        src={holderPhotos[0]!}
+                        alt="Foto portador 1"
+                        className="h-20 w-20 rounded-full object-cover border-2 border-green-500 shadow"
                       />
-                      <span className={`inline-flex cursor-pointer items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold transition ${
-                        holderPhotos[idx]
-                          ? "bg-green-600 text-white hover:bg-green-700"
-                          : "bg-primary text-primary-foreground hover:bg-primary/90"
-                      }`}>
-                        {holderPhotos[idx] ? "✓ Trocar foto" : "Selecionar foto"}
-                      </span>
-                    </label>
+                    ) : (
+                      <div className="flex h-20 w-20 flex-shrink-0 items-center justify-center rounded-full bg-muted border-2 border-dashed border-border">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-9 w-9 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
+                        </svg>
+                      </div>
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold text-foreground">
+                        📸 Foto do rosto
+                        <span className="ml-1 text-xs font-bold text-amber-600 dark:text-amber-400">• Obrigatório</span>
+                      </p>
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        Exigida para acesso biométrico ao Maracanã. Use uma foto recente, com rosto visível e fundo neutro.
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => openCamera(0)}
+                          className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+                            holderPhotos[0]
+                              ? "border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20"
+                              : "bg-primary text-primary-foreground hover:bg-primary/90"
+                          }`}
+                        >
+                          📷 {holderPhotos[0] ? "Tirar nova foto" : "Câmera ao vivo"}
+                        </button>
+                      </div>
+                    </div>
                   </div>
+                  {!holderPhotos[0] && (
+                    <p className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-400">
+                      ⚠ A foto do Portador 1 (titular) é obrigatória para prosseguir.
+                    </p>
+                  )}
                 </div>
-                {idx === 0 && !holderPhotos[0] && (
-                  <p className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-400">
-                    ⚠ A foto do Portador 1 (titular) é obrigatória para prosseguir.
-                  </p>
-                )}
-              </div>
+              )}
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
@@ -938,11 +1158,6 @@ function ComprarPage() {
             </section>
           ))}
 
-          {ticketList.length > 0 && !holderPhotos[0] && (
-            <p className="text-center text-sm font-medium text-amber-600 dark:text-amber-400">
-              ⚠ Adicione a foto do rosto do Portador 1 para continuar
-            </p>
-          )}
 
           <button
             type="submit"
@@ -953,6 +1168,48 @@ function ComprarPage() {
           </button>
         </form>
       </main>
+
+      {/* Camera overlay */}
+      {cameraOpen && (
+        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/90 p-4">
+          <div className="w-full max-w-lg space-y-4">
+            <p className="text-center text-sm font-semibold text-white">
+              Posicione seu rosto no centro e clique em <strong>Tirar foto</strong>
+            </p>
+            <div className="relative overflow-hidden rounded-2xl bg-black">
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full rounded-2xl"
+              />
+              {/* Face guide */}
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <div className="h-52 w-40 rounded-full border-4 border-white/60 shadow-lg" />
+              </div>
+            </div>
+            <canvas ref={canvasRef} className="hidden" />
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={closeCamera}
+                className="flex-1 rounded-full border border-white/30 py-3 text-sm font-bold text-white transition hover:bg-white/10"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={capturePhoto}
+                className="flex-1 rounded-full bg-white py-3 text-sm font-bold text-black transition hover:bg-white/90"
+              >
+                📸 Tirar foto
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <Footer />
     </div>
   );
